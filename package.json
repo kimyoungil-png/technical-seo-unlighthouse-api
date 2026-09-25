@@ -1,0 +1,16 @@
+{
+  "name": "technical-seo-unlighthouse-api",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "unlighthouse": "0.18.1"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}

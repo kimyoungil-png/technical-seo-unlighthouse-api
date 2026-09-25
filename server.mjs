@@ -10,7 +10,6 @@ app.use(express.json({ limit: "1mb" }))
 
 const PORT = process.env.PORT || 8080
 
-
 app.get("/", (req, res) => {
   res.json({
     status: "ok",
@@ -18,16 +17,13 @@ app.get("/", (req, res) => {
   })
 })
 
-
 app.get("/health", (req, res) => {
   res.json({
     status: "ok"
   })
 })
 
-
 app.post("/audit", async (req, res) => {
-
   const { url } = req.body || {}
 
   if (!url) {
@@ -59,9 +55,15 @@ app.post("/audit", async (req, res) => {
     join(tmpdir(), "unlighthouse-")
   )
 
+  console.log("AUDIT START")
+  console.log("URL:", url)
+  console.log("SITE:", site)
+  console.log("PATH:", path)
+  console.log("OUTPUT:", outputDir)
+
+  const command = "./node_modules/.bin/unlighthouse-ci"
+
   const args = [
-    "unlighthouse",
-    "ci",
     "--config-file",
     "unlighthouse.config.mjs",
     "--site",
@@ -75,13 +77,16 @@ app.post("/audit", async (req, res) => {
     "--no-cache"
   ]
 
+  console.log("COMMAND:", command, args.join(" "))
+
   const child = spawn(
-    "npx",
+    command,
     args,
     {
       env: {
         ...process.env,
-        CHROME_PATH: "/usr/bin/chromium"
+        CHROME_PATH: "/usr/bin/chromium",
+        PUPPETEER_EXECUTABLE_PATH: "/usr/bin/chromium"
       }
     }
   )
@@ -90,20 +95,26 @@ app.post("/audit", async (req, res) => {
   let stderr = ""
 
   child.stdout.on("data", chunk => {
-    stdout += chunk.toString()
+    const text = chunk.toString()
+    stdout += text
+    console.log("[UNLIGHTHOUSE]", text.trim())
   })
 
   child.stderr.on("data", chunk => {
-    stderr += chunk.toString()
+    const text = chunk.toString()
+    stderr += text
+    console.error("[UNLIGHTHOUSE ERROR]", text.trim())
   })
 
   const timeout = setTimeout(() => {
+    console.error("AUDIT TIMEOUT: killing child process")
     child.kill("SIGKILL")
   }, 300000)
 
   child.on("close", async code => {
-
     clearTimeout(timeout)
+
+    console.log("UNLIGHTHOUSE EXIT CODE:", code)
 
     if (code !== 0) {
       return res.status(500).json({
@@ -115,8 +126,9 @@ app.post("/audit", async (req, res) => {
     }
 
     try {
-
       const files = await findJsonFiles(outputDir)
+
+      console.log("JSON FILES:", files.length)
 
       const reports = []
 
@@ -125,9 +137,11 @@ app.post("/audit", async (req, res) => {
           const text = await readFile(file, "utf8")
           reports.push(JSON.parse(text))
         } catch {
-          // JSON以外は無視
+          // skip invalid JSON
         }
       }
+
+      console.log("AUDIT COMPLETE")
 
       return res.json({
         success: true,
@@ -140,6 +154,7 @@ app.post("/audit", async (req, res) => {
       })
 
     } catch (error) {
+      console.error("REPORT READ ERROR:", error)
 
       return res.status(500).json({
         success: false,
@@ -147,20 +162,14 @@ app.post("/audit", async (req, res) => {
         stdout,
         stderr
       })
-
     }
-
   })
-
 })
 
-
 async function findJsonFiles(dir) {
-
   const results = []
 
   async function walk(current) {
-
     const entries = await readdir(
       current,
       {
@@ -169,7 +178,6 @@ async function findJsonFiles(dir) {
     )
 
     for (const entry of entries) {
-
       const full = join(
         current,
         entry.name
@@ -185,16 +193,13 @@ async function findJsonFiles(dir) {
       ) {
         results.push(full)
       }
-
     }
-
   }
 
   await walk(dir)
 
   return results
 }
-
 
 app.listen(
   PORT,

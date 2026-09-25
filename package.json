@@ -7,8 +7,8 @@
     "start": "node server.mjs"
   },
   "dependencies": {
-    "express": "^5.1.0",
-    "unlighthouse": "0.18.1"
+    "@unlighthouse/cli": "0.18.1",
+    "express": "^5.1.0"
   },
   "engines": {
     "node": ">=22.18.0"

@@ -3,7 +3,7 @@ FROM node:22-bookworm-slim
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y \
+    && apt-get install -y --no-install-recommends \
        chromium \
        ca-certificates \
        fonts-liberation \
@@ -23,7 +23,7 @@ ENV NODE_ENV=production
 
 COPY package.json ./
 
-RUN npm install
+RUN npm install --omit=dev --no-audit --no-fund
 
 COPY . .
 

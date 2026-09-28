@@ -10,6 +10,7 @@ app.use(express.json({ limit: "1mb" }))
 
 const PORT = process.env.PORT || 8080
 
+
 app.get("/", (req, res) => {
   res.json({
     status: "ok",
@@ -17,17 +18,20 @@ app.get("/", (req, res) => {
   })
 })
 
+
 app.get("/health", (req, res) => {
   res.json({
     status: "ok"
   })
 })
 
+
 app.post("/audit", async (req, res) => {
   const { url } = req.body || {}
 
   if (!url) {
     return res.status(400).json({
+      success: false,
       error: "url is required"
     })
   }
@@ -38,12 +42,14 @@ app.post("/audit", async (req, res) => {
     parsed = new URL(url)
   } catch {
     return res.status(400).json({
+      success: false,
       error: "invalid url"
     })
   }
 
   if (!["http:", "https:"].includes(parsed.protocol)) {
     return res.status(400).json({
+      success: false,
       error: "only http and https URLs are supported"
     })
   }
@@ -120,6 +126,7 @@ app.post("/audit", async (req, res) => {
       return res.status(500).json({
         success: false,
         code,
+        error: "Unlighthouse failed",
         stdout,
         stderr
       })
@@ -135,38 +142,116 @@ app.post("/audit", async (req, res) => {
       for (const file of files) {
         try {
           const text = await readFile(file, "utf8")
-          reports.push(JSON.parse(text))
+          const data = JSON.parse(text)
+
+          if (
+            data &&
+            typeof data === "object" &&
+            data.categories &&
+            data.audits
+          ) {
+            reports.push(data)
+          }
         } catch {
-          // skip invalid JSON
+          // invalid JSON is ignored
         }
       }
 
+      if (!reports.length) {
+        return res.status(500).json({
+          success: false,
+          error: "No Lighthouse report found",
+          stdout,
+          stderr
+        })
+      }
+
+      const report = reports[0]
+
+      const metrics = extractMetrics(report)
+
       console.log("AUDIT COMPLETE")
+      console.log("METRICS:", metrics)
 
       return res.json({
         success: true,
         url,
         site,
         path,
-        reportCount: reports.length,
-        reports,
-        stdout
+        metrics
       })
 
     } catch (error) {
       console.error("REPORT READ ERROR:", error)
 
-      return res.json({
-        success: true,
-        url,
-        site,
-        path,
-        reportCount: reports.length,
-        message: "Unlighthouse audit completed"
+      return res.status(500).json({
+        success: false,
+        error: error.message,
+        stdout,
+        stderr
       })
     }
   })
 })
+
+
+function extractMetrics(report) {
+  const categories = report.categories || {}
+  const audits = report.audits || {}
+
+  const score = category => {
+    const value = categories?.[category]?.score
+
+    if (typeof value !== "number") {
+      return null
+    }
+
+    return Math.round(value * 100)
+  }
+
+  const numericValue = auditId => {
+    const value = audits?.[auditId]?.numericValue
+
+    if (typeof value !== "number") {
+      return null
+    }
+
+    return value
+  }
+
+  const displayValue = auditId => {
+    const value = audits?.[auditId]?.displayValue
+
+    if (!value) {
+      return null
+    }
+
+    return value
+  }
+
+  return {
+    performance: score("performance"),
+    seo: score("seo"),
+    accessibility: score("accessibility"),
+    bestPractices: score("best-practices"),
+
+    lcpMs: numericValue("largest-contentful-paint"),
+    lcp: displayValue("largest-contentful-paint"),
+
+    clsValue: numericValue("cumulative-layout-shift"),
+    cls: displayValue("cumulative-layout-shift"),
+
+    fcpMs: numericValue("first-contentful-paint"),
+    fcp: displayValue("first-contentful-paint"),
+
+    tbtMs: numericValue("total-blocking-time"),
+    tbt: displayValue("total-blocking-time"),
+
+    speedIndexMs: numericValue("speed-index"),
+    speedIndex: displayValue("speed-index")
+  }
+}
+
 
 async function findJsonFiles(dir) {
   const results = []
@@ -202,6 +287,7 @@ async function findJsonFiles(dir) {
 
   return results
 }
+
 
 app.listen(
   PORT,

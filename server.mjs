@@ -9,19 +9,22 @@ const app = express()
 app.use(express.json({ limit: "1mb" }))
 
 const PORT = process.env.PORT || 8080
+const API_VERSION = "metrics-v2"
 
 
 app.get("/", (req, res) => {
   res.json({
     status: "ok",
-    service: "Technical SEO Unlighthouse API"
+    service: "Technical SEO Unlighthouse API",
+    version: API_VERSION
   })
 })
 
 
 app.get("/health", (req, res) => {
   res.json({
-    status: "ok"
+    status: "ok",
+    version: API_VERSION
   })
 })
 
@@ -137,7 +140,7 @@ app.post("/audit", async (req, res) => {
 
       console.log("JSON FILES:", files.length)
 
-      const reports = []
+      let expandedReport = null
 
       for (const file of files) {
         try {
@@ -147,34 +150,37 @@ app.post("/audit", async (req, res) => {
           if (
             data &&
             typeof data === "object" &&
-            data.categories &&
-            data.audits
+            !Array.isArray(data) &&
+            data.summary &&
+            data.summary.categories &&
+            data.summary.metrics &&
+            Array.isArray(data.routes)
           ) {
-            reports.push(data)
+            expandedReport = data
+            break
           }
         } catch {
-          // invalid JSON is ignored
+          // invalid or unrelated JSON is ignored
         }
       }
 
-      if (!reports.length) {
+      if (!expandedReport) {
         return res.status(500).json({
           success: false,
-          error: "No Lighthouse report found",
+          error: "No jsonExpanded Unlighthouse report found",
           stdout,
           stderr
         })
       }
 
-      const report = reports[0]
-
-      const metrics = extractMetrics(report)
+      const metrics = extractMetrics(expandedReport)
 
       console.log("AUDIT COMPLETE")
       console.log("METRICS:", metrics)
 
       return res.json({
         success: true,
+        version: API_VERSION,
         url,
         site,
         path,
@@ -196,60 +202,73 @@ app.post("/audit", async (req, res) => {
 
 
 function extractMetrics(report) {
-  const categories = report.categories || {}
-  const audits = report.audits || {}
+  const categories = report?.summary?.categories || {}
+  const metrics = report?.summary?.metrics || {}
 
-  const score = category => {
-    const value = categories?.[category]?.score
-
-    if (typeof value !== "number") {
-      return null
-    }
-
-    return Math.round(value * 100)
+  const categoryScore = key => {
+    const value = categories?.[key]?.averageScore
+    return typeof value === "number"
+      ? Math.round(value * 100)
+      : null
   }
 
-  const numericValue = auditId => {
-    const value = audits?.[auditId]?.numericValue
-
-    if (typeof value !== "number") {
-      return null
-    }
-
-    return value
+  const metricAverage = key => {
+    const value = metrics?.[key]?.averageNumericValue
+    return typeof value === "number"
+      ? value
+      : null
   }
 
-  const displayValue = auditId => {
-    const value = audits?.[auditId]?.displayValue
-
-    if (!value) {
-      return null
-    }
-
-    return value
-  }
+  const lcpMs = metricAverage("largest-contentful-paint")
+  const clsValue = metricAverage("cumulative-layout-shift")
+  const fcpMs = metricAverage("first-contentful-paint")
+  const tbtMs = metricAverage("total-blocking-time")
 
   return {
-    performance: score("performance"),
-    seo: score("seo"),
-    accessibility: score("accessibility"),
-    bestPractices: score("best-practices"),
+    performance: categoryScore("performance"),
+    seo: categoryScore("seo"),
+    accessibility: categoryScore("accessibility"),
+    bestPractices: categoryScore("best-practices"),
 
-    lcpMs: numericValue("largest-contentful-paint"),
-    lcp: displayValue("largest-contentful-paint"),
+    lcpMs,
+    lcp: formatMs(lcpMs),
 
-    clsValue: numericValue("cumulative-layout-shift"),
-    cls: displayValue("cumulative-layout-shift"),
+    clsValue,
+    cls: formatCls(clsValue),
 
-    fcpMs: numericValue("first-contentful-paint"),
-    fcp: displayValue("first-contentful-paint"),
+    fcpMs,
+    fcp: formatMs(fcpMs),
 
-    tbtMs: numericValue("total-blocking-time"),
-    tbt: displayValue("total-blocking-time"),
-
-    speedIndexMs: numericValue("speed-index"),
-    speedIndex: displayValue("speed-index")
+    tbtMs,
+    tbt: formatTbt(tbtMs)
   }
+}
+
+
+function formatMs(value) {
+  if (typeof value !== "number") {
+    return null
+  }
+
+  return `${(value / 1000).toFixed(2)} s`
+}
+
+
+function formatTbt(value) {
+  if (typeof value !== "number") {
+    return null
+  }
+
+  return `${Math.round(value)} ms`
+}
+
+
+function formatCls(value) {
+  if (typeof value !== "number") {
+    return null
+  }
+
+  return value.toFixed(3)
 }
 
 

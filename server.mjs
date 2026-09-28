@@ -3,6 +3,7 @@ import { spawn } from "node:child_process"
 import { mkdtemp, readFile, readdir } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import puppeteer from "puppeteer-core"
 
 const app = express()
 
@@ -26,6 +27,100 @@ app.get("/health", (req, res) => {
     status: "ok",
     version: API_VERSION
   })
+})
+
+
+app.post("/screenshot", async (req, res) => {
+  const { url } = req.body || {}
+
+  if (!url) {
+    return res.status(400).json({
+      success: false,
+      error: "url is required"
+    })
+  }
+
+  let parsed
+
+  try {
+    parsed = new URL(url)
+  } catch {
+    return res.status(400).json({
+      success: false,
+      error: "invalid url"
+    })
+  }
+
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    return res.status(400).json({
+      success: false,
+      error: "only http and https URLs are supported"
+    })
+  }
+
+  let browser
+
+  try {
+    browser = await puppeteer.launch({
+      executablePath: "/usr/bin/chromium",
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu"
+      ]
+    })
+
+    const page = await browser.newPage()
+
+    await page.setViewport({
+      width: 390,
+      height: 844,
+      deviceScaleFactor: 2,
+      isMobile: true,
+      hasTouch: true
+    })
+
+    await page.setUserAgent(
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) " +
+      "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 " +
+      "Mobile/15E148 Safari/604.1"
+    )
+
+    await page.goto(url, {
+      waitUntil: "networkidle2",
+      timeout: 45000
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 1500))
+
+    const screenshot = await page.screenshot({
+      type: "png",
+      fullPage: false
+    })
+
+    return res.json({
+      success: true,
+      viewport: {
+        width: 390,
+        height: 844,
+        deviceScaleFactor: 2
+      },
+      imageBase64: Buffer.from(screenshot).toString("base64")
+    })
+  } catch (error) {
+    console.error("SCREENSHOT ERROR:", error)
+
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    })
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {})
+    }
+  }
 })
 
 

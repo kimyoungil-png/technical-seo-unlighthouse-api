@@ -8,10 +8,12 @@ import PptxGenJS from "pptxgenjs"
 
 const app = express()
 
-app.use(express.json({ limit: "1mb" }))
+app.use(express.json({ limit: "2mb" }))
 
 const PORT = process.env.PORT || 8080
 const API_VERSION = "metrics-v2"
+const FONT = "Meiryo"
+const CHROME_PATH = "/usr/bin/chromium"
 
 
 app.get("/", (req, res) => {
@@ -34,68 +36,16 @@ app.get("/health", (req, res) => {
 app.post("/screenshot", async (req, res) => {
   const { url } = req.body || {}
 
-  if (!url) {
-    return res.status(400).json({
-      success: false,
-      error: "url is required"
-    })
-  }
-
-  let parsed
-
-  try {
-    parsed = new URL(url)
-  } catch {
-    return res.status(400).json({
-      success: false,
-      error: "invalid url"
-    })
-  }
-
-  if (!["http:", "https:"].includes(parsed.protocol)) {
-    return res.status(400).json({
-      success: false,
-      error: "only http and https URLs are supported"
-    })
+  const validation = validateUrl(url)
+  if (!validation.ok) {
+    return res.status(validation.status).json(validation.body)
   }
 
   let browser
 
   try {
-    browser = await puppeteer.launch({
-      executablePath: "/usr/bin/chromium",
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu"
-      ]
-    })
-
-    const page = await browser.newPage()
-
-    await page.setViewport({
-      width: 390,
-      height: 844,
-      deviceScaleFactor: 2,
-      isMobile: true,
-      hasTouch: true
-    })
-
-    await page.setUserAgent(
-      "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) " +
-      "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 " +
-      "Mobile/15E148 Safari/604.1"
-    )
-
-    await page.goto(url, {
-      waitUntil: "networkidle2",
-      timeout: 45000
-    })
-
-    await new Promise(resolve => setTimeout(resolve, 1500))
-
+    browser = await launchBrowser()
+    const page = await openMobilePage(browser, url)
     const screenshot = await page.screenshot({
       type: "png",
       fullPage: false
@@ -126,7 +76,7 @@ app.post("/screenshot", async (req, res) => {
 
 
 app.post("/report-ppt", async (req, res) => {
-  const { url, checks } = req.body || {}
+  const { url, checks, summary } = req.body || {}
 
   if (!url || !Array.isArray(checks)) {
     return res.status(400).json({
@@ -135,54 +85,17 @@ app.post("/report-ppt", async (req, res) => {
     })
   }
 
-  let parsed
-
-  try {
-    parsed = new URL(url)
-  } catch {
-    return res.status(400).json({
-      success: false,
-      error: "invalid url"
-    })
+  const validation = validateUrl(url)
+  if (!validation.ok) {
+    return res.status(validation.status).json(validation.body)
   }
 
+  const parsed = validation.parsed
   let browser
 
   try {
-    browser = await puppeteer.launch({
-      executablePath: "/usr/bin/chromium",
-      headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu"
-      ]
-    })
-
-    const page = await browser.newPage()
-
-    await page.setViewport({
-      width: 390,
-      height: 844,
-      deviceScaleFactor: 2,
-      isMobile: true,
-      hasTouch: true
-    })
-
-    await page.setUserAgent(
-      "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) " +
-      "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 " +
-      "Mobile/15E148 Safari/604.1"
-    )
-
-    await page.goto(url, {
-      waitUntil: "networkidle2",
-      timeout: 45000
-    })
-
-    await new Promise(resolve => setTimeout(resolve, 1500))
-
+    browser = await launchBrowser()
+    const page = await openMobilePage(browser, url)
     const screenshot = await page.screenshot({
       type: "png",
       fullPage: false
@@ -196,8 +109,8 @@ app.post("/report-ppt", async (req, res) => {
     pptx.company = "Ascent Networks"
     pptx.lang = "ja-JP"
     pptx.theme = {
-      headFontFace: "Aptos",
-      bodyFontFace: "Aptos",
+      headFontFace: FONT,
+      bodyFontFace: FONT,
       lang: "ja-JP"
     }
 
@@ -208,17 +121,28 @@ app.post("/report-ppt", async (req, res) => {
     const slideH = 7.5
 
     slide.addText("Technical SEO Checker", {
-      x: 0.45, y: 0.12, w: 3.5, h: 0.22,
-      fontFace: "Aptos", fontSize: 10,
-      color: "777777", bold: true,
+      x: 0.45,
+      y: 0.12,
+      w: 3.5,
+      h: 0.22,
+      fontFace: FONT,
+      fontSize: 10,
+      color: "777777",
+      bold: true,
       margin: 0
     })
 
     slide.addText("Confidential", {
-      x: 11.73, y: 0.08, w: 1.15, h: 0.28,
-      fontFace: "Aptos", fontSize: 13,
-      color: "FF0000", bold: true,
-      align: "center", valign: "mid",
+      x: 11.73,
+      y: 0.08,
+      w: 1.15,
+      h: 0.28,
+      fontFace: FONT,
+      fontSize: 13,
+      color: "FF0000",
+      bold: true,
+      align: "center",
+      valign: "mid",
       margin: 0.02,
       line: { color: "FF0000", width: 1 },
       radius: 0.08
@@ -232,30 +156,31 @@ app.post("/report-ppt", async (req, res) => {
     }).format(new Date())
 
     slide.addText(`${pathLabel}（${dateLabel}時点チェック）`, {
-      x: 0.45, y: 0.42, w: 8.7, h: 0.28,
-      fontFace: "Aptos", fontSize: 17,
-      color: "111111", bold: true,
+      x: 0.45,
+      y: 0.42,
+      w: 8.7,
+      h: 0.28,
+      fontFace: FONT,
+      fontSize: 17,
+      color: "111111",
+      bold: true,
       margin: 0
     })
 
-    const ngCount = checks.filter(row => row.Status === "NG").length
-    const warnCount = checks.filter(row => row.Status === "△").length
-
-    let summaryText = "重大なTechnical SEOエラーは検出されませんでした。"
-    let summaryColor = "003CFF"
-
-    if (ngCount > 0) {
-      summaryText = `要修正（NG）が${ngCount}件検出されました。`
-      summaryColor = "D00000"
-    } else if (warnCount > 0) {
-      summaryText = `重大なエラーはありません。要確認（△）が${warnCount}件あります。`
-    }
+    const summaryText = buildSummaryText(summary, checks)
 
     slide.addText(summaryText, {
-      x: 0.45, y: 0.69, w: 9.0, h: 0.3,
-      fontFace: "Aptos", fontSize: 17,
-      color: summaryColor, bold: true,
-      margin: 0
+      x: 0.45,
+      y: 0.69,
+      w: 9.0,
+      h: 0.38,
+      fontFace: FONT,
+      fontSize: 15,
+      color: "003CFF",
+      bold: true,
+      margin: 0,
+      breakLine: false,
+      fit: "shrink"
     })
 
     const phoneX = 0.38
@@ -287,8 +212,8 @@ app.post("/report-ppt", async (req, res) => {
       [
         { text: "No", options: { bold: true, align: "center" } },
         { text: "チェック項目", options: { bold: true, align: "center" } },
-        { text: "判定", options: { bold: true, align: "center" } },
-        { text: "結果", options: { bold: true, align: "center" } }
+        { text: "結果", options: { bold: true, align: "center" } },
+        { text: "判定", options: { bold: true, align: "center" } }
       ]
     ]
 
@@ -305,8 +230,8 @@ app.post("/report-ppt", async (req, res) => {
       tableRows.push([
         String(row.No),
         itemText,
-        String(row.Status),
-        resultText
+        resultText,
+        String(row.Status)
       ])
     }
 
@@ -322,13 +247,13 @@ app.post("/report-ppt", async (req, res) => {
       border: { type: "solid", color: "D9D9D9", pt: 0.5 },
       fill: "FFFFFF",
       color: "111111",
-      fontFace: "Aptos",
+      fontFace: FONT,
       fontSize: 6.5,
       margin: 0.03,
       valign: "mid",
       breakLine: false,
       autoFit: false,
-      colW: [0.38, 3.25, 0.55, 5.18],
+      colW: [0.38, 3.25, 5.18, 0.55],
       rowH: 0.29,
       bold: false
     })
@@ -360,37 +285,15 @@ app.post("/report-ppt", async (req, res) => {
 app.post("/audit", async (req, res) => {
   const { url } = req.body || {}
 
-  if (!url) {
-    return res.status(400).json({
-      success: false,
-      error: "url is required"
-    })
+  const validation = validateUrl(url)
+  if (!validation.ok) {
+    return res.status(validation.status).json(validation.body)
   }
 
-  let parsed
-
-  try {
-    parsed = new URL(url)
-  } catch {
-    return res.status(400).json({
-      success: false,
-      error: "invalid url"
-    })
-  }
-
-  if (!["http:", "https:"].includes(parsed.protocol)) {
-    return res.status(400).json({
-      success: false,
-      error: "only http and https URLs are supported"
-    })
-  }
-
+  const parsed = validation.parsed
   const site = `${parsed.protocol}//${parsed.host}`
   const path = parsed.pathname || "/"
-
-  const outputDir = await mkdtemp(
-    join(tmpdir(), "unlighthouse-")
-  )
+  const outputDir = await mkdtemp(join(tmpdir(), "unlighthouse-"))
 
   console.log("AUDIT START")
   console.log("URL:", url)
@@ -399,7 +302,6 @@ app.post("/audit", async (req, res) => {
   console.log("OUTPUT:", outputDir)
 
   const command = "./node_modules/.bin/unlighthouse-ci"
-
   const args = [
     "--config-file",
     "unlighthouse.config.mjs",
@@ -416,17 +318,13 @@ app.post("/audit", async (req, res) => {
 
   console.log("COMMAND:", command, args.join(" "))
 
-  const child = spawn(
-    command,
-    args,
-    {
-      env: {
-        ...process.env,
-        CHROME_PATH: "/usr/bin/chromium",
-        PUPPETEER_EXECUTABLE_PATH: "/usr/bin/chromium"
-      }
+  const child = spawn(command, args, {
+    env: {
+      ...process.env,
+      CHROME_PATH,
+      PUPPETEER_EXECUTABLE_PATH: CHROME_PATH
     }
-  )
+  })
 
   let stdout = ""
   let stderr = ""
@@ -450,7 +348,6 @@ app.post("/audit", async (req, res) => {
 
   child.on("close", async code => {
     clearTimeout(timeout)
-
     console.log("UNLIGHTHOUSE EXIT CODE:", code)
 
     if (code !== 0) {
@@ -465,7 +362,6 @@ app.post("/audit", async (req, res) => {
 
     try {
       const files = await findJsonFiles(outputDir)
-
       console.log("JSON FILES:", files.length)
 
       let expandedReport = null
@@ -502,7 +398,6 @@ app.post("/audit", async (req, res) => {
       }
 
       const metrics = extractMetrics(expandedReport)
-
       console.log("AUDIT COMPLETE")
       console.log("METRICS:", metrics)
 
@@ -514,7 +409,6 @@ app.post("/audit", async (req, res) => {
         path,
         metrics
       })
-
     } catch (error) {
       console.error("REPORT READ ERROR:", error)
 
@@ -529,22 +423,125 @@ app.post("/audit", async (req, res) => {
 })
 
 
+function validateUrl(url) {
+  if (!url) {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        success: false,
+        error: "url is required"
+      }
+    }
+  }
+
+  try {
+    const parsed = new URL(url)
+
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      return {
+        ok: false,
+        status: 400,
+        body: {
+          success: false,
+          error: "only http and https URLs are supported"
+        }
+      }
+    }
+
+    return {
+      ok: true,
+      parsed
+    }
+  } catch {
+    return {
+      ok: false,
+      status: 400,
+      body: {
+        success: false,
+        error: "invalid url"
+      }
+    }
+  }
+}
+
+
+async function launchBrowser() {
+  return puppeteer.launch({
+    executablePath: CHROME_PATH,
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu"
+    ]
+  })
+}
+
+
+async function openMobilePage(browser, url) {
+  const page = await browser.newPage()
+
+  await page.setViewport({
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 2,
+    isMobile: true,
+    hasTouch: true
+  })
+
+  await page.setUserAgent(
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) " +
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 " +
+    "Mobile/15E148 Safari/604.1"
+  )
+
+  await page.goto(url, {
+    waitUntil: "networkidle2",
+    timeout: 45000
+  })
+
+  await new Promise(resolve => setTimeout(resolve, 1500))
+
+  return page
+}
+
+
+function buildSummaryText(summary, checks) {
+  const cleanSummary = String(summary || "").trim()
+
+  if (cleanSummary) {
+    return cleanSummary
+  }
+
+  const ngCount = checks.filter(row => row.Status === "NG").length
+  const warnCount = checks.filter(row => row.Status === "△").length
+
+  if (ngCount > 0) {
+    return `要修正（NG）が${ngCount}件検出されました。公開前に優先確認してください。`
+  }
+
+  if (warnCount > 0) {
+    return `重大なエラーはありません。要確認（△）が${warnCount}件あります。`
+  }
+
+  return "重大なTechnical SEOエラーは検出されませんでした。"
+}
+
+
 function extractMetrics(report) {
   const categories = report?.summary?.categories || {}
   const metrics = report?.summary?.metrics || {}
 
   const categoryScore = key => {
     const value = categories?.[key]?.averageScore
-    return typeof value === "number"
-      ? Math.round(value * 100)
-      : null
+    return typeof value === "number" ? Math.round(value * 100) : null
   }
 
   const metricAverage = key => {
     const value = metrics?.[key]?.averageNumericValue
-    return typeof value === "number"
-      ? value
-      : null
+    return typeof value === "number" ? value : null
   }
 
   const lcpMs = metricAverage("largest-contentful-paint")
@@ -557,16 +554,12 @@ function extractMetrics(report) {
     seo: categoryScore("seo"),
     accessibility: categoryScore("accessibility"),
     bestPractices: categoryScore("best-practices"),
-
     lcpMs,
     lcp: formatMs(lcpMs),
-
     clsValue,
     cls: formatCls(clsValue),
-
     fcpMs,
     fcp: formatMs(fcpMs),
-
     tbtMs,
     tbt: formatTbt(tbtMs)
   }
@@ -604,44 +597,26 @@ async function findJsonFiles(dir) {
   const results = []
 
   async function walk(current) {
-    const entries = await readdir(
-      current,
-      {
-        withFileTypes: true
-      }
-    )
+    const entries = await readdir(current, { withFileTypes: true })
 
     for (const entry of entries) {
-      const full = join(
-        current,
-        entry.name
-      )
+      const full = join(current, entry.name)
 
       if (entry.isDirectory()) {
         await walk(full)
       }
 
-      if (
-        entry.isFile() &&
-        entry.name.endsWith(".json")
-      ) {
+      if (entry.isFile() && entry.name.endsWith(".json")) {
         results.push(full)
       }
     }
   }
 
   await walk(dir)
-
   return results
 }
 
 
-app.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
-    console.log(
-      `Server listening on port ${PORT}`
-    )
-  }
-)
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server listening on port ${PORT}`)
+})

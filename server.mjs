@@ -28,28 +28,37 @@ app.get("/health", (req, res) => {
 
 
 let sharedBrowser = null
+let browserLaunchPromise = null
 
 async function getSharedBrowser() {
   if (sharedBrowser?.connected) {
     return sharedBrowser
   }
 
-  sharedBrowser = await puppeteer.launch({
-    executablePath: "/usr/bin/chromium",
-    headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-    ],
-  })
+  if (!browserLaunchPromise) {
+    browserLaunchPromise = puppeteer.launch({
+      executablePath: "/usr/bin/chromium",
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+      ],
+    }).then(browser => {
+      sharedBrowser = browser
+      browser.on("disconnected", () => {
+        if (sharedBrowser === browser) {
+          sharedBrowser = null
+        }
+      })
+      return browser
+    }).finally(() => {
+      browserLaunchPromise = null
+    })
+  }
 
-  sharedBrowser.on("disconnected", () => {
-    sharedBrowser = null
-  })
-
-  return sharedBrowser
+  return browserLaunchPromise
 }
 
 
@@ -63,7 +72,7 @@ async function captureMobileScreenshot(url) {
     await page.setViewport({
       width: 390,
       height: 844,
-      deviceScaleFactor: 2,
+      deviceScaleFactor: 1.5,
       isMobile: true,
       hasTouch: true,
     })
@@ -106,7 +115,7 @@ app.post("/screenshot", async (req, res) => {
     const screenshot = await captureMobileScreenshot(url)
     return res.json({
       success: true,
-      viewport: { width: 390, height: 844, deviceScaleFactor: 2 },
+      viewport: { width: 390, height: 844, deviceScaleFactor: 1.5 },
       imageBase64: Buffer.from(screenshot).toString("base64"),
     })
   } catch (error) {

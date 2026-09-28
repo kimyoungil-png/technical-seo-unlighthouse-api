@@ -4,6 +4,7 @@ import { mkdtemp, readFile, readdir } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import puppeteer from "puppeteer-core"
+import PptxGenJS from "pptxgenjs"
 
 const app = express()
 
@@ -111,6 +112,238 @@ app.post("/screenshot", async (req, res) => {
     })
   } catch (error) {
     console.error("SCREENSHOT ERROR:", error)
+
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    })
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {})
+    }
+  }
+})
+
+
+app.post("/report-ppt", async (req, res) => {
+  const { url, checks } = req.body || {}
+
+  if (!url || !Array.isArray(checks)) {
+    return res.status(400).json({
+      success: false,
+      error: "url and checks are required"
+    })
+  }
+
+  let parsed
+
+  try {
+    parsed = new URL(url)
+  } catch {
+    return res.status(400).json({
+      success: false,
+      error: "invalid url"
+    })
+  }
+
+  let browser
+
+  try {
+    browser = await puppeteer.launch({
+      executablePath: "/usr/bin/chromium",
+      headless: true,
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu"
+      ]
+    })
+
+    const page = await browser.newPage()
+
+    await page.setViewport({
+      width: 390,
+      height: 844,
+      deviceScaleFactor: 2,
+      isMobile: true,
+      hasTouch: true
+    })
+
+    await page.setUserAgent(
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) " +
+      "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 " +
+      "Mobile/15E148 Safari/604.1"
+    )
+
+    await page.goto(url, {
+      waitUntil: "networkidle2",
+      timeout: 45000
+    })
+
+    await new Promise(resolve => setTimeout(resolve, 1500))
+
+    const screenshot = await page.screenshot({
+      type: "png",
+      fullPage: false
+    })
+
+    const pptx = new PptxGenJS()
+    pptx.layout = "LAYOUT_WIDE"
+    pptx.author = "Ascent SEO Team"
+    pptx.subject = "Technical SEO Check Report"
+    pptx.title = "Technical SEO Checker"
+    pptx.company = "Ascent Networks"
+    pptx.lang = "ja-JP"
+    pptx.theme = {
+      headFontFace: "Aptos",
+      bodyFontFace: "Aptos",
+      lang: "ja-JP"
+    }
+
+    const slide = pptx.addSlide()
+    slide.background = { color: "FFFFFF" }
+
+    const slideW = 13.333
+    const slideH = 7.5
+
+    slide.addText("Technical SEO Checker", {
+      x: 0.45, y: 0.12, w: 3.5, h: 0.22,
+      fontFace: "Aptos", fontSize: 10,
+      color: "777777", bold: true,
+      margin: 0
+    })
+
+    slide.addText("Confidential", {
+      x: 11.73, y: 0.08, w: 1.15, h: 0.28,
+      fontFace: "Aptos", fontSize: 13,
+      color: "FF0000", bold: true,
+      align: "center", valign: "mid",
+      margin: 0.02,
+      line: { color: "FF0000", width: 1 },
+      radius: 0.08
+    })
+
+    const pathLabel = parsed.pathname || "/"
+    const dateLabel = new Intl.DateTimeFormat("ja-JP", {
+      timeZone: "Asia/Tokyo",
+      month: "numeric",
+      day: "numeric"
+    }).format(new Date())
+
+    slide.addText(`${pathLabel}（${dateLabel}時点チェック）`, {
+      x: 0.45, y: 0.42, w: 8.7, h: 0.28,
+      fontFace: "Aptos", fontSize: 17,
+      color: "111111", bold: true,
+      margin: 0
+    })
+
+    const ngCount = checks.filter(row => row.Status === "NG").length
+    const warnCount = checks.filter(row => row.Status === "△").length
+
+    let summaryText = "重大なTechnical SEOエラーは検出されませんでした。"
+    let summaryColor = "003CFF"
+
+    if (ngCount > 0) {
+      summaryText = `要修正（NG）が${ngCount}件検出されました。`
+      summaryColor = "D00000"
+    } else if (warnCount > 0) {
+      summaryText = `重大なエラーはありません。要確認（△）が${warnCount}件あります。`
+    }
+
+    slide.addText(summaryText, {
+      x: 0.45, y: 0.69, w: 9.0, h: 0.3,
+      fontFace: "Aptos", fontSize: 17,
+      color: summaryColor, bold: true,
+      margin: 0
+    })
+
+    const phoneX = 0.38
+    const phoneY = 1.22
+    const phoneW = 2.95
+    const phoneH = 6.05
+
+    for (const offset of [0, 0.08, 0.16]) {
+      slide.addShape(pptx.ShapeType.roundRect, {
+        x: phoneX + offset,
+        y: phoneY + offset,
+        w: phoneW - offset * 2,
+        h: phoneH - offset * 1.6,
+        rectRadius: 0.14,
+        fill: { color: "FFFFFF", transparency: 100 },
+        line: { color: "A5A5A5", width: 1 }
+      })
+    }
+
+    slide.addImage({
+      data: `data:image/png;base64,${Buffer.from(screenshot).toString("base64")}`,
+      x: phoneX + 0.27,
+      y: phoneY + 0.26,
+      w: phoneW - 0.54,
+      h: phoneH - 0.5
+    })
+
+    const tableRows = [
+      [
+        { text: "No", options: { bold: true, align: "center" } },
+        { text: "チェック項目", options: { bold: true, align: "center" } },
+        { text: "判定", options: { bold: true, align: "center" } },
+        { text: "結果", options: { bold: true, align: "center" } }
+      ]
+    ]
+
+    for (const row of checks) {
+      let resultText = String(row.Result || "")
+      const actionText = String(row.Action || "")
+
+      if (actionText && actionText !== "対応不要") {
+        resultText += `\nコメント: ${actionText}`
+      }
+
+      const itemText = `${row.Item}\n${row.Meaning}`
+
+      tableRows.push([
+        String(row.No),
+        itemText,
+        String(row.Status),
+        resultText
+      ])
+    }
+
+    const tableX = 3.45
+    const tableY = 1.24
+    const tableW = slideW - tableX - 0.45
+
+    slide.addTable(tableRows, {
+      x: tableX,
+      y: tableY,
+      w: tableW,
+      h: slideH - tableY - 0.28,
+      border: { type: "solid", color: "D9D9D9", pt: 0.5 },
+      fill: "FFFFFF",
+      color: "111111",
+      fontFace: "Aptos",
+      fontSize: 6.5,
+      margin: 0.03,
+      valign: "mid",
+      breakLine: false,
+      autoFit: false,
+      colW: [0.38, 3.25, 0.55, 5.18],
+      rowH: 0.29,
+      bold: false
+    })
+
+    const fileBuffer = await pptx.write({
+      outputType: "nodebuffer"
+    })
+
+    return res.json({
+      success: true,
+      fileBase64: Buffer.from(fileBuffer).toString("base64"),
+      filename: "technical-seo-report.pptx"
+    })
+  } catch (error) {
+    console.error("PPT REPORT ERROR:", error)
 
     return res.status(500).json({
       success: false,

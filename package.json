@@ -9,8 +9,7 @@
   "dependencies": {
     "@unlighthouse/cli": "0.18.1",
     "express": "^5.1.0",
-    "puppeteer-core": "^24.22.3",
-    "pptxgenjs": "^3.12.0"
+    "puppeteer-core": "^24.22.3"
   },
   "engines": {
     "node": ">=22.18.0"

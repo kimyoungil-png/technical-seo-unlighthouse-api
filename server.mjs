@@ -86,7 +86,11 @@ async function captureMobileScreenshot(url) {
     await page.goto(url, { waitUntil: "networkidle2", timeout: 45000 })
     await new Promise(resolve => setTimeout(resolve, 1500))
 
-    return await page.screenshot({ type: "png", fullPage: false })
+    const title = (await page.title()).replace(/\s+/g, " ").trim()
+    const finalUrl = page.url()
+    const screenshot = await page.screenshot({ type: "png", fullPage: false })
+
+    return { screenshot, title, finalUrl }
   } finally {
     await context.close().catch(() => {})
   }
@@ -112,11 +116,13 @@ app.post("/screenshot", async (req, res) => {
   }
 
   try {
-    const screenshot = await captureMobileScreenshot(url)
+    const result = await captureMobileScreenshot(url)
     return res.json({
       success: true,
       viewport: { width: 390, height: 844, deviceScaleFactor: 1.5 },
-      imageBase64: Buffer.from(screenshot).toString("base64"),
+      title: result.title,
+      finalUrl: result.finalUrl,
+      imageBase64: Buffer.from(result.screenshot).toString("base64"),
     })
   } catch (error) {
     console.error("SCREENSHOT ERROR:", error)

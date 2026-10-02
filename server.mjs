@@ -10,7 +10,7 @@ const app = express()
 app.use(express.json({ limit: "2mb" }))
 
 const PORT = process.env.PORT || 8080
-const API_VERSION = "metrics-v3"
+const API_VERSION = "metrics-v4"
 
 
 app.get("/", (req, res) => {
@@ -29,8 +29,43 @@ app.get("/health", (req, res) => {
 
 let sharedBrowser = null
 let browserLaunchPromise = null
+let browserScreenshotCount = 0
+let screenshotQueue = Promise.resolve()
+let lastScreenshotFinishedAt = 0
+
+const MAX_SCREENSHOTS_PER_BROWSER = 10
+const SCREENSHOT_CACHE_TTL_MS = 15 * 60 * 1000
+const SCREENSHOT_CACHE_MAX_ITEMS = 60
+const SCREENSHOT_GAP_MS = 1000
+const screenshotCache = new Map()
+
+const SCREENSHOT_USER_AGENT =
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8) " +
+  "AppleWebKit/537.36 (KHTML, like Gecko) " +
+  "Chrome/130.0.0.0 Mobile Safari/537.36"
+
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+
+async function restartSharedBrowser() {
+  const browser = sharedBrowser
+  sharedBrowser = null
+  browserScreenshotCount = 0
+
+  if (browser) {
+    await browser.close().catch(() => {})
+  }
+}
+
 
 async function getSharedBrowser() {
+  if (
+    sharedBrowser?.connected &&
+    browserScreenshotCount >= MAX_SCREENSHOTS_PER_BROWSER
+  ) {
+    await restartSharedBrowser()
+  }
+
   if (sharedBrowser?.connected) {
     return sharedBrowser
   }
@@ -44,12 +79,16 @@ async function getSharedBrowser() {
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
         "--disable-gpu",
+        "--disable-blink-features=AutomationControlled",
+        "--lang=ja-JP",
       ],
     }).then(browser => {
       sharedBrowser = browser
+      browserScreenshotCount = 0
       browser.on("disconnected", () => {
         if (sharedBrowser === browser) {
           sharedBrowser = null
+          browserScreenshotCount = 0
         }
       })
       return browser
@@ -62,12 +101,77 @@ async function getSharedBrowser() {
 }
 
 
-const SCREENSHOT_USER_AGENT =
-  "Mozilla/5.0 (Linux; Android 14; Pixel 8) " +
-  "AppleWebKit/537.36 (KHTML, like Gecko) " +
-  "Chrome/130.0.0.0 Mobile Safari/537.36"
+function pruneScreenshotCache() {
+  const now = Date.now()
 
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
+  for (const [url, item] of screenshotCache.entries()) {
+    if (now - item.createdAt > SCREENSHOT_CACHE_TTL_MS) {
+      screenshotCache.delete(url)
+    }
+  }
+
+  while (screenshotCache.size > SCREENSHOT_CACHE_MAX_ITEMS) {
+    const oldestKey = screenshotCache.keys().next().value
+    if (!oldestKey) break
+    screenshotCache.delete(oldestKey)
+  }
+}
+
+
+function getCachedScreenshot(url) {
+  pruneScreenshotCache()
+  const item = screenshotCache.get(url)
+
+  if (!item) {
+    return null
+  }
+
+  // Move the item to the end so the cache behaves like a small LRU.
+  screenshotCache.delete(url)
+  screenshotCache.set(url, item)
+
+  return {
+    screenshot: item.screenshot,
+    title: item.title,
+    finalUrl: item.finalUrl,
+    bodyTextLength: item.bodyTextLength,
+    imageMimeType: item.imageMimeType,
+    cached: true,
+  }
+}
+
+
+function setCachedScreenshot(url, result) {
+  screenshotCache.delete(url)
+  screenshotCache.set(url, {
+    ...result,
+    createdAt: Date.now(),
+  })
+  pruneScreenshotCache()
+}
+
+
+function queueScreenshotTask(task) {
+  const run = async () => {
+    const elapsed = Date.now() - lastScreenshotFinishedAt
+    const waitMs = Math.max(0, SCREENSHOT_GAP_MS - elapsed)
+
+    if (waitMs) {
+      await delay(waitMs)
+    }
+
+    try {
+      return await task()
+    } finally {
+      lastScreenshotFinishedAt = Date.now()
+    }
+  }
+
+  const result = screenshotQueue.then(run, run)
+  screenshotQueue = result.catch(() => {})
+  return result
+}
+
 
 function screenshotPageLooksBlocked(title, bodyText) {
   const text = `${title}\n${bodyText}`.toLowerCase()
@@ -113,9 +217,6 @@ async function captureMobileScreenshotOnce(url) {
       })
     })
 
-    // networkidle2 is unreliable on analytics-heavy pages and was causing
-    // otherwise valid screenshots to be skipped. Load the DOM first, then
-    // give late-rendered content a short best-effort settling window.
     await page.goto(url, {
       waitUntil: "domcontentloaded",
       timeout: 35000,
@@ -150,21 +251,25 @@ async function captureMobileScreenshotOnce(url) {
     }
 
     const screenshot = await page.screenshot({
-      type: "png",
+      type: "jpeg",
+      quality: 85,
       fullPage: false,
     })
 
-    if (!screenshot || screenshot.length < 5000) {
+    if (!screenshot || screenshot.length < 3000) {
       throw new Error(
         `Screenshot image is unexpectedly small (${screenshot?.length || 0} bytes)`
       )
     }
+
+    browserScreenshotCount += 1
 
     return {
       screenshot,
       title,
       finalUrl,
       bodyTextLength: bodyText.length,
+      imageMimeType: "image/jpeg",
     }
   } finally {
     await context.close().catch(() => {})
@@ -173,27 +278,47 @@ async function captureMobileScreenshotOnce(url) {
 
 
 async function captureMobileScreenshot(url) {
-  let lastError = null
-
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    try {
-      return await captureMobileScreenshotOnce(url)
-    } catch (error) {
-      lastError = error
-      console.error(
-        `SCREENSHOT ATTEMPT ${attempt}/3 FAILED:`,
-        error?.message || error
-      )
-
-      if (attempt < 3) {
-        await delay(attempt === 1 ? 1500 : 4000)
-      }
-    }
+  const cached = getCachedScreenshot(url)
+  if (cached) {
+    return cached
   }
 
-  throw lastError || new Error("Screenshot failed after retries")
-}
+  return queueScreenshotTask(async () => {
+    const cachedAfterQueue = getCachedScreenshot(url)
+    if (cachedAfterQueue) {
+      return cachedAfterQueue
+    }
 
+    let lastError = null
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        const result = await captureMobileScreenshotOnce(url)
+        setCachedScreenshot(url, result)
+        return {
+          ...result,
+          cached: false,
+        }
+      } catch (error) {
+        lastError = error
+        console.error(
+          `SCREENSHOT ATTEMPT ${attempt}/3 FAILED:`,
+          error?.message || error
+        )
+
+        // A stale Chromium process was a common cause of an entire second
+        // report losing screenshots. Force a clean browser before retrying.
+        await restartSharedBrowser()
+
+        if (attempt < 3) {
+          await delay(attempt === 1 ? 1500 : 3500)
+        }
+      }
+    }
+
+    throw lastError || new Error("Screenshot failed after retries")
+  })
+}
 
 app.post("/screenshot", async (req, res) => {
   const { url } = req.body || {}
@@ -221,6 +346,8 @@ app.post("/screenshot", async (req, res) => {
       title: result.title,
       finalUrl: result.finalUrl,
       bodyTextLength: result.bodyTextLength,
+      imageMimeType: result.imageMimeType,
+      cached: Boolean(result.cached),
       imageBase64: Buffer.from(result.screenshot).toString("base64"),
     })
   } catch (error) {
@@ -458,12 +585,7 @@ async function findJsonFiles(dir) {
 
 
 process.on("SIGTERM", async () => {
-  const browser = sharedBrowser
-  sharedBrowser = null
-
-  if (browser) {
-    await browser.close().catch(() => {})
-  }
+  await restartSharedBrowser()
 
   process.exit(0)
 })

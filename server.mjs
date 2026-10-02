@@ -62,7 +62,29 @@ async function getSharedBrowser() {
 }
 
 
-async function captureMobileScreenshot(url) {
+const SCREENSHOT_USER_AGENT =
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8) " +
+  "AppleWebKit/537.36 (KHTML, like Gecko) " +
+  "Chrome/130.0.0.0 Mobile Safari/537.36"
+
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
+
+function screenshotPageLooksBlocked(title, bodyText) {
+  const text = `${title}\n${bodyText}`.toLowerCase()
+  return [
+    "access denied",
+    "error denied",
+    "request blocked",
+    "forbidden",
+    "temporarily unavailable",
+    "captcha",
+    "bot detection",
+    "アクセスが拒否",
+  ].some(token => text.includes(token))
+}
+
+
+async function captureMobileScreenshotOnce(url) {
   const browser = await getSharedBrowser()
   const context = await browser.createBrowserContext()
 
@@ -77,23 +99,99 @@ async function captureMobileScreenshot(url) {
       hasTouch: true,
     })
 
-    await page.setUserAgent(
-      "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) " +
-      "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 " +
-      "Mobile/15E148 Safari/604.1"
-    )
+    await page.setUserAgent(SCREENSHOT_USER_AGENT)
+    await page.setExtraHTTPHeaders({
+      "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.7,en;q=0.6",
+    })
 
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 45000 })
-    await new Promise(resolve => setTimeout(resolve, 1500))
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, "webdriver", {
+        get: () => undefined,
+      })
+      Object.defineProperty(navigator, "languages", {
+        get: () => ["ja-JP", "ja", "en-US", "en"],
+      })
+    })
 
-    const title = (await page.title()).replace(/\s+/g, " ").trim()
+    // networkidle2 is unreliable on analytics-heavy pages and was causing
+    // otherwise valid screenshots to be skipped. Load the DOM first, then
+    // give late-rendered content a short best-effort settling window.
+    await page.goto(url, {
+      waitUntil: "domcontentloaded",
+      timeout: 35000,
+    })
+
+    await page.waitForNetworkIdle({
+      idleTime: 750,
+      timeout: 8000,
+    }).catch(() => {})
+    await delay(1800)
+
+    const pageState = await page.evaluate(() => ({
+      title: document.title || "",
+      bodyText: document.body?.innerText || "",
+      scrollHeight: document.documentElement?.scrollHeight || 0,
+    }))
+
+    const title = pageState.title.replace(/\s+/g, " ").trim()
+    const bodyText = pageState.bodyText.replace(/\s+/g, " ").trim()
     const finalUrl = page.url()
-    const screenshot = await page.screenshot({ type: "png", fullPage: false })
 
-    return { screenshot, title, finalUrl }
+    if (screenshotPageLooksBlocked(title, bodyText)) {
+      throw new Error(
+        `Blocked/error page detected: ${title || bodyText.slice(0, 80)}`
+      )
+    }
+
+    if (bodyText.length < 80 && pageState.scrollHeight < 500) {
+      throw new Error(
+        `Page did not render enough visible content (text=${bodyText.length}, height=${pageState.scrollHeight})`
+      )
+    }
+
+    const screenshot = await page.screenshot({
+      type: "png",
+      fullPage: false,
+    })
+
+    if (!screenshot || screenshot.length < 5000) {
+      throw new Error(
+        `Screenshot image is unexpectedly small (${screenshot?.length || 0} bytes)`
+      )
+    }
+
+    return {
+      screenshot,
+      title,
+      finalUrl,
+      bodyTextLength: bodyText.length,
+    }
   } finally {
     await context.close().catch(() => {})
   }
+}
+
+
+async function captureMobileScreenshot(url) {
+  let lastError = null
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await captureMobileScreenshotOnce(url)
+    } catch (error) {
+      lastError = error
+      console.error(
+        `SCREENSHOT ATTEMPT ${attempt}/3 FAILED:`,
+        error?.message || error
+      )
+
+      if (attempt < 3) {
+        await delay(attempt === 1 ? 1500 : 4000)
+      }
+    }
+  }
+
+  throw lastError || new Error("Screenshot failed after retries")
 }
 
 
@@ -122,6 +220,7 @@ app.post("/screenshot", async (req, res) => {
       viewport: { width: 390, height: 844, deviceScaleFactor: 1.5 },
       title: result.title,
       finalUrl: result.finalUrl,
+      bodyTextLength: result.bodyTextLength,
       imageBase64: Buffer.from(result.screenshot).toString("base64"),
     })
   } catch (error) {
